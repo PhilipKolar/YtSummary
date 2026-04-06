@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch yt-summary bot files for changes
+
+[Path]
+PathModified=/home/phil/repos/yt-summary/.env
+PathModified=/home/phil/repos/yt-summary/bot.py
+
+[Install]
+WantedBy=multi-user.target
