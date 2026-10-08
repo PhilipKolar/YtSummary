@@ -20,6 +20,9 @@ ALLOWED_USER_ID = int(os.environ["ALLOWED_USER_ID"])
 
 claude = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
+MODEL = "claude-sonnet-5-5"
+EFFORT = "low"  # summarising needs little reasoning; low keeps it fast and cheap
+
 MAX_TRANSCRIPT_CHARS = 400_000
 TELEGRAM_MAX_CHARS = 4000  # Telegram message limit is 4096, leave a small buffer
 
@@ -171,8 +174,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         summary = ""
         async with claude.messages.stream(
-            model="claude-opus-4-6",
-            max_tokens=1024,
+            model=MODEL,
+            max_tokens=4096,  # headroom in case the model thinks before answering
+            output_config={"effort": EFFORT},
             messages=[{"role": "user", "content": PROMPT + transcript}],
         ) as stream:
             async for text in stream.text_stream:
