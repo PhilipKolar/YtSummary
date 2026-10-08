@@ -1,8 +1,11 @@
+import asyncio
 import os
 import re
 import logging
+from urllib.parse import urlparse, parse_qs
 
 import anthropic
+import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
@@ -21,9 +24,29 @@ MAX_TRANSCRIPT_CHARS = 400_000
 TELEGRAM_MAX_CHARS = 4000  # Telegram message limit is 4096, leave a small buffer
 
 
+VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{11}")
+YOUTUBE_PATH_PREFIXES = ("embed", "live", "shorts", "v")
+
+
 def extract_video_id(text):
-    match = re.search(r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([A-Za-z0-9_-]{11})', text)
-    return match.group(1) if match else None
+    """Pull a video ID out of any common YouTube URL (watch, youtu.be, /live/, /shorts/, /embed/)."""
+    for token in text.split():
+        url = urlparse(token if "//" in token else "//" + token)
+        host = (url.hostname or "").lower()
+        if host == "youtu.be":
+            parts = url.path.strip("/").split("/")
+            candidate = parts[0] if parts else ""
+        elif host == "youtube.com" or host.endswith(".youtube.com"):
+            parts = url.path.strip("/").split("/")
+            if parts[0] in YOUTUBE_PATH_PREFIXES and len(parts) > 1:
+                candidate = parts[1]
+            else:
+                candidate = parse_qs(url.query).get("v", [""])[0]
+        else:
+            continue
+        if VIDEO_ID_RE.fullmatch(candidate):
+            return candidate
+    return None
 
 
 def format_timestamp(seconds):
@@ -32,6 +55,27 @@ def format_timestamp(seconds):
     m = (seconds % 3600) // 60
     s = seconds % 60
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+LIVE_MESSAGES = {
+    "is_live": "That stream is still live. Send the link again once it has ended.",
+    "is_upcoming": "That stream hasn't started yet.",
+    "post_live": "That stream has just ended and YouTube is still processing it. Try again in a few minutes.",
+}
+
+
+def get_live_status(video_id):
+    """Return yt-dlp's live_status (is_live, is_upcoming, post_live, was_live, not_live) or None if unknown."""
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+        return info.get("live_status")
+    except Exception as e:
+        message = str(e)
+        if "will begin" in message or "Premieres in" in message:
+            return "is_upcoming"
+        log.warning("Could not determine live status for %s: %s", video_id, message)
+        return None
 
 
 def build_transcript(video_id):
@@ -73,10 +117,10 @@ PROMPT = """You are summarising a YouTube video transcript for display in Telegr
 Structure your response exactly like this:
 
 📌 *Key Points*
-• 3-5 bullets maximum. Each bullet max 10 words. Most important takeaways only.
+• 2-7 bullets, scaled to how much the video actually covers: a short single-topic clip needs only a couple, a long wide-ranging one needs more. Each bullet max 10 words. Most important takeaways only, no filler.
 
 📝 *Summary*
-3-5 short sentences, each on its own line with a blank line between them. No walls of text.
+2-8 short sentences, scaled the same way, each on its own line with a blank line between them. No walls of text.
 
 Use this exact formatting — asterisks for bold headers, bullet points with •. Do not add any other headers or sections.
 
@@ -106,16 +150,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Fetching transcript...")
 
     try:
-        transcript = build_transcript(video_id)
-    except TranscriptsDisabled:
-        await update.message.reply_text("Transcripts are disabled for this video.")
-        return
-    except NoTranscriptFound:
-        await update.message.reply_text("No transcript found for this video.")
-        return
+        transcript = await asyncio.to_thread(build_transcript, video_id)
     except Exception as e:
-        log.exception("Failed to fetch transcript")
-        await update.message.reply_text(f"Failed to fetch transcript: {e}")
+        # Streams that are live, upcoming or still processing report "subtitles disabled",
+        # so check for that before blaming the video.
+        live_status = await asyncio.to_thread(get_live_status, video_id)
+        if live_status in LIVE_MESSAGES:
+            await update.message.reply_text(LIVE_MESSAGES[live_status])
+        elif isinstance(e, TranscriptsDisabled):
+            await update.message.reply_text("Transcripts are disabled for this video.")
+        elif isinstance(e, NoTranscriptFound):
+            await update.message.reply_text("No transcript found for this video.")
+        else:
+            log.exception("Failed to fetch transcript")
+            await update.message.reply_text(f"Failed to fetch transcript: {e}")
         return
 
     await update.message.reply_text("Summarising...")

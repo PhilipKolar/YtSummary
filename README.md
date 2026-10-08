@@ -26,7 +26,7 @@ git clone https://github.com/YOUR_USERNAME/yt-summary.git
 cd yt-summary
 python3 -m venv venv
 source venv/bin/activate
-pip install python-telegram-bot anthropic youtube-transcript-api python-dotenv
+pip install python-telegram-bot anthropic youtube-transcript-api python-dotenv yt-dlp
 ```
 
 ### 2. Create a Telegram bot
@@ -107,6 +107,7 @@ sudo systemctl stop yt-summary
 ## Limitations
 
 - Only works for videos that have captions (auto-generated or manual)
+- Livestreams that are still live (or just ended and still processing) are detected and you are asked to retry later
 - Very long videos (3+ hours) will have their transcript trimmed to fit the model's context window
 
 ## Secrets reference
